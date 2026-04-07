@@ -1,0 +1,415 @@
+component vehicle_body
+% Vehicle Body :4.0
+% Представляет корпус двухосного автомобиля при продольном движении.
+% Блок учитывает массу кузова, аэродинамическое сопротивление, уклон дороги
+% и перераспределение веса между осями при ускорении и изменении профиля дороги.
+% У автомобиля может быть постоянный или переменный коэффициент сопротивления.
+% На каждой оси может быть одинаковое или разное число колёс.
+% Дополнительно можно включить динамику крена/подвески и переменную массу и инерцию.
+% Автомобиль не движется вертикально относительно поверхности дороги.
+
+% Соединение H — механический переходной порт, связанный с горизонтальным
+% движением корпуса автомобиля. Развиваемое шинами тяговое усилие должно
+% подключаться к этому порту. Порты V, NF и NR — физические выходные порты
+% сигнала для скорости автомобиля и нормальных сил на передних и задних колёсах
+% соответственно. Нормальные силы считаются положительными, если они направлены вниз.
+
+% Порт W — физический входной порт сигнала, соответствующий скорости ветра
+% навстречу движению. Если моделируется переменный коэффициент сопротивления,
+% физический входной порт CD задаёт значение коэффициента аэродинамического сопротивления.
+% Порт beta — физический входной порт сигнала, соответствующий углу наклона дороги.
+
+% Порты CG и M — физические входные порты, доступные при моделировании переменной массы.
+% CG принимает двухэлементный вектор, задающий смещение по осям x и y центра масс
+% дополнительного груза относительно центра масс автомобиля. Порт M задаёт массу этого груза.
+% Если одновременно включены переменная масса и динамика крена, физический порт J
+% задаёт момент инерции дополнительной массы относительно её собственного центра масс.
+
+nodes
+    H = foundation.mechanical.translational.translational; % H:top
+end
+
+outputs
+    V =  { 0, 'm/s' }; % V
+    NR = { 0, 'N' };   % NR
+    NF = { 0, 'N' };   % NF
+end
+
+inputs
+    wind = { 0, 'm/s' }; % W
+    beta = { 0, 'rad' }; % beta
+end
+
+inputs(ExternalAccess = none)
+    CD = {0, '1'};                  % CD
+    cg_load = { [0 0], 'm' };       % CG
+    mass_load = { 0, 'kg' };        % M
+    inertia_load = { 0, 'kg*m^2' }; % J
+end
+
+annotations
+    H   : Side = left
+    [V, wind, CD, cg_load, mass_load, inertia_load]: Side = top
+    [NR, NF, beta] : Side = bottom
+end
+
+parameters
+    mass = { 1200, 'kg' };      % Mass
+    n_w  = { 2,    '1' };       % Number of wheels per axle
+    x_f  = { 1.4,  'm' };       % Horizontal distance from CG to front axle
+    x_r  = { 1.6,  'm' };       % Horizontal distance from CG to rear axle
+    y_c  = { 0.5,  'm' };       % CG height above ground
+    mass_var = false;     % Externally-defined additional mass
+    model_pitch = false;  % Pitch dynamics
+    inertia = { 4000, 'kg*m^2'}; % Pitch moment of inertia
+    suspension_model = sdl.enum.linearTLU.linear; % Suspension model
+    k_f  = { 1e4,  'N/m' };     % Front suspension stiffness
+    b_f  = { 1e4,  'N/(m/s)' }; % Front suspension damping
+    k_r  = { 1e4,  'N/m' };     % Rear suspension stiffness
+    b_r  = { 1e4,  'N/(m/s)' }; % Rear suspension damping
+    k_f_TLU = { [ -2000 -1000 0 1000 2000] , 'N' }; % Front suspension stiffness force vector
+    x_f_TLU = { [ -0.4 -0.2 0 0.2 0.4 ], 'm' };     % Front suspension deformation vector
+    b_f_TLU = { [ -200 -100 0 100 200] , 'N' };     % Front suspension damping force vector
+    v_f_TLU = { [ -4 -2 0 2 4 ], 'm/s' };           % Front suspension velocity vector
+    k_r_TLU = { [ -2000 -1000 0 1000 2000] , 'N' }; % Rear suspension stiffness force vector
+    x_r_TLU = { [ -0.4 -0.2 0 0.2 0.4 ], 'm' };     % Rear suspension deformation vector
+    b_r_TLU = { [ -200 -100 0 100 200] , 'N' };     % Rear suspension damping force vector
+    v_r_TLU = { [ -4 -2 0 2 4 ], 'm/s' };           % Rear suspension velocity vector
+    interp_method = simscape.enum.interpolation.linear;   % Interpolation method
+    extrap_method = simscape.enum.extrapolation.linear;   % Extrapolation method
+    model_hardstop = false;      % Hard stop
+    upper_bound_f = { .25,'m'};  % Front upper bound
+    lower_bound_f = {-.25,'m'};  % Front lower bound
+    stop_k_f = { 1e6, 'N/m' };   % Front contact stiffness
+    stop_b_f = { 150,'N/(m/s)'}; % Front contact damping
+    upper_bound_r = { .25,'m'};  % Rear upper bound
+    lower_bound_r = {-.25,'m'};  % Rear lower bound
+    stop_k_r = { 1e6, 'N/m' };   % Rear contact stiffness
+    stop_b_r = { 150,'N/(m/s)'}; % Rear contact damping
+    initial_pitch = { 0, 'rad'}; % Initial pitch
+    initial_pitch_rate = { 0, 'rad/s'}; % Initial pitch rate
+    g    = { 9.81, 'm/s^2' }; % Gravitational acceleration
+    liftoff_warning = false;  % Negative normal force warning
+    Cd_var = false;           % Variable drag coefficient
+    area = { 3,    'm^2'};      % Frontal area
+    Cd   = { 0.4,  '1' };       % Drag coefficient
+    rho  = { 1.18, 'kg/m^3' };  % Air density
+end
+
+
+parameters (Access = private)
+    n_wf = round(n_w(1));
+    n_wr = round(n_w(end));
+end
+
+variables
+    v = { value = { 0, 'm/s' }, priority = priority.high }; % Velocity
+end
+
+variables (Access = protected)
+    f = { 0, 'N' };                                         % Longitudinal force
+    suspension_force_f = { 0, 'N' };                        % Front suspension force
+    suspension_force_r = { 0, 'N' };                        % Rear suspension force
+    elevation = { value = { 0, 'm' }, priority = priority.high }; % Elevation change
+end
+
+branches 
+    f: H.f -> *; 
+end
+
+if mass_var == false
+    parameters
+        x_f_total = x_f;
+        x_r_total = x_r;
+        y_c_total = y_c;
+        mass_total = mass;
+        inertia_total = inertia;
+    end
+else
+    annotations
+        [ cg_load, mass_load ] : ExternalAccess = Modify
+    end
+    if model_pitch == true
+        annotations
+            inertia_load : ExternalAccess = Modify
+        end
+        intermediates % For logging
+            inertia_total = inertia + inertia_load + mass_load*(cg_load(1)^2+cg_load(2)^2);   % Total inertia
+        end
+        equations
+            assert(inertia_total>=0)
+        end
+    else
+        intermediates % For logging
+            inertia_total = inertia + mass_load*(cg_load(1)^2+cg_load(2)^2);   % Total inertia
+        end
+    end
+    intermediates % For logging
+        x_f_total = x_f + cg_load(1)*mass_load/(mass+mass_load); % Horizontal distance from CG to front axle
+        x_r_total = x_r - cg_load(1)*mass_load/(mass+mass_load); % Horizontal distance from CG to rear axle
+        y_c_total = y_c + cg_load(2)*mass_load/(mass+mass_load); % CG height above ground
+        mass_total = mass + mass_load;    % Total mass
+    end
+    annotations
+        inertia_total                     : LoggingUnit = 'kg*m^2';
+        [x_f_total, x_r_total, y_c_total] : LoggingUnit = 'm';
+        mass_total                        : LoggingUnit = 'kg'
+    end
+    equations
+        assert(mass_total >= 0)
+    end
+end
+
+if Cd_var
+    annotations
+        Cd : ExternalAccess = none;
+        CD : ExternalAccess = modify;
+    end
+    intermediates (Access = private, ExternalAccess = none)
+        Cd_use = simscape.function.limit(CD, 0, inf, false);
+    end
+else % Constant drag coefficient
+    annotations
+        Cd : ExternalAccess = modify;
+        CD : ExternalAccess = none;
+    end
+    equations
+        assert(Cd >= 0)
+    end
+    parameters (Access = private)
+        Cd_use = Cd;
+    end
+end
+
+if model_pitch == false
+    annotations
+      [inertia,...
+       suspension_model,...
+       k_f,...
+       k_r,...
+       b_f,...
+       b_r,...
+       k_f_TLU,...
+       x_f_TLU,...
+       b_f_TLU,...
+       v_f_TLU,...
+       k_r_TLU,...
+       x_r_TLU,...
+       b_r_TLU,...
+       v_r_TLU,...
+       interp_method,...
+       extrap_method,...
+       model_hardstop,...
+       upper_bound_f,...
+       lower_bound_f,...
+       stop_k_f,...
+       stop_b_f,...
+       upper_bound_r,...
+       lower_bound_r,...
+       stop_k_r,...
+       stop_b_r...
+       initial_pitch,...
+       initial_pitch_rate] : ExternalAccess = none;
+    end
+else
+    if suspension_model == sdl.enum.linearTLU.TLU
+        annotations
+          [k_f,...
+           k_r...
+           b_f,...
+           b_r] : ExternalAccess = none;
+        end
+    else
+        annotations
+          [k_f_TLU,...
+           x_f_TLU,...
+           b_f_TLU,...
+           v_f_TLU,...
+           k_r_TLU,...
+           x_r_TLU,...
+           b_r_TLU,...
+           v_r_TLU,...
+           interp_method,...
+           extrap_method] : ExternalAccess = none;
+        end
+    end
+    if model_hardstop == false
+        annotations
+          [upper_bound_f,...
+           lower_bound_f,...
+           stop_k_f,...
+           stop_b_f,...
+           upper_bound_r,...
+           lower_bound_r,...
+           stop_k_r,...
+           stop_b_r] : ExternalAccess = none;
+        end
+    end
+end
+    
+intermediates (Access = private, ExternalAccess = none)
+    mg_sin = mass_total * g * sin(beta);
+    mg_cos = mass_total * g * cos(beta);
+    Cd_force = 0.5*Cd_use*area*rho*(v + wind)^2 * (2*ge((v + wind), 0) - 1);
+end
+
+equations
+    assert(mass > 0)
+    assert(length(n_w) <= 2)
+    assert(all(n_w >= 1))
+    assert(x_f > 0)
+    assert(x_r > 0)
+    assert(area > 0)
+    
+    assert(g >= 0)
+    assert(rho >= 0)
+    
+    % Projection of forces except tractive effort on X-axis
+    f == mg_sin + Cd_force + mass_total * der(v);
+    NF == ((mg_cos * x_r_total - f * y_c_total) / (x_f_total+x_r_total) + suspension_force_f) / n_wf;
+    NR == ((mg_cos * x_f_total + f * y_c_total) / (x_f_total+x_r_total) + suspension_force_r) / n_wr;
+    V == v;
+    v == H.v
+    der(elevation) == v * sin(beta);
+end
+
+intermediates (Access = private) % For logging
+    power_dissipated = Cd_force * v; % Aerodynamic drag power
+    elevation_potential_energy = mass_total * g * elevation; % Elevation potential energy change
+end
+annotations
+    power_dissipated           : LoggingUnit = 'W';
+    elevation_potential_energy : LoggingUnit = 'kJ';
+end
+
+
+if model_pitch
+    variables
+        pitch = { value = initial_pitch, priority = priority.high }; % Pitch
+        pitch_rate = { value = initial_pitch_rate, priority = priority.high }; % Pitch rate
+        hardstop_force_f = { 0, 'N'};   % Front hardstop force
+        hardstop_force_r = { 0, 'N'};   % Rear hardstop force
+    end
+    equations
+        assert(inertia>0)
+        der(pitch_rate) == (f*y_c_total + suspension_force_f*x_f_total - suspension_force_r*x_r_total)/inertia_total;
+        der(pitch) == pitch_rate;
+    end
+    if model_hardstop
+        equations
+            assert(upper_bound_f>0)
+            assert(lower_bound_f<0)
+            assert(stop_k_f>0)
+            assert(stop_b_f>0)
+            assert(upper_bound_r>0)
+            assert(lower_bound_r<0)
+            assert(stop_k_r>0)
+            assert(stop_b_r>0)
+            let
+                % Compute hard stop forces
+                disp_f = x_f_total * pitch;
+                vel_f = x_f_total * pitch_rate;
+                disp_r = -x_r_total * pitch;
+                vel_r = -x_r_total * pitch_rate;
+                upper_force_f = stop_k_f  * (disp_f - upper_bound_f) + stop_b_f  * vel_f;
+                lower_force_f = stop_k_f * (disp_f - lower_bound_f) + stop_b_f * vel_f;
+                upper_force_r = stop_k_r  * (disp_r - upper_bound_r) + stop_b_r  * vel_r;
+                lower_force_r = stop_k_r * (disp_r - lower_bound_r) + stop_b_r * vel_r;
+            in
+                % Front hardstop
+                if disp_f >= upper_bound_f      % Past upper stop
+                    hardstop_force_f == -upper_force_f;
+                elseif disp_f > lower_bound_f   % Between upper and lower stops
+                    hardstop_force_f == {0, 'N'};
+                else                            % Past lower stop
+                    hardstop_force_f == -lower_force_f;
+                end
+                % Rear hardstop
+                if disp_r >= upper_bound_r      % Past upper stop
+                    hardstop_force_r == -upper_force_r;
+                elseif disp_r > lower_bound_r   % Between upper and lower stops
+                    hardstop_force_r == {0, 'N'};
+                else                            % Past lower stop
+                    hardstop_force_r == -lower_force_r;
+                end
+            end
+        end
+    else
+        equations
+            hardstop_force_f == 0;
+            hardstop_force_r == 0;
+        end
+    end
+   
+    if suspension_model == sdl.enum.linearTLU.linear % Constant stiffness and damping
+        equations
+            assert(k_f>0)
+            assert(k_r>0)
+            assert(b_f>0)
+            assert(b_r>0)
+            suspension_force_f == -k_f*x_f_total*pitch - b_f*x_f_total*pitch_rate + hardstop_force_f;
+            suspension_force_r == k_r*x_r_total*pitch + b_r*x_r_total*pitch_rate + hardstop_force_r;
+        end
+    else                                            % TLU stiffness and damping
+        if interp_method == simscape.enum.interpolation.linear
+            equations
+                assert(length(x_f_TLU)>=2)
+                assert(length(v_f_TLU)>=2)
+                assert(length(x_r_TLU)>=2)
+                assert(length(v_r_TLU)>=2)
+            end
+        else
+            equations
+                assert(length(x_f_TLU)>=3)
+                assert(length(v_f_TLU)>=3)
+                assert(length(x_r_TLU)>=3)
+                assert(length(v_r_TLU)>=3)
+            end
+        end
+        equations
+            assert(all(diff(x_f_TLU)>0))
+            assert(length(k_f_TLU)==length(x_f_TLU))
+            assert(all(diff(v_f_TLU)>0))
+            assert(length(b_f_TLU)==length(v_f_TLU))
+            assert(all(diff(x_r_TLU)>0))
+            assert(length(k_r_TLU)==length(x_r_TLU))
+            assert(all(diff(v_r_TLU)>0))
+            assert(length(b_r_TLU)==length(v_r_TLU))
+            let
+                k_f_force = tablelookup( x_f_TLU, k_f_TLU, x_f_total*pitch, interpolation=interp_method,extrapolation=extrap_method);
+                b_f_force = tablelookup( v_f_TLU, b_f_TLU, x_f_total*pitch_rate, interpolation=interp_method,extrapolation=extrap_method);
+                k_r_force = tablelookup( x_r_TLU, k_r_TLU, -x_r_total*pitch, interpolation=interp_method,extrapolation=extrap_method);
+                b_r_force = tablelookup( v_r_TLU, b_r_TLU, -x_r_total*pitch_rate, interpolation=interp_method,extrapolation=extrap_method);
+            in
+                suspension_force_f == -k_f_force - b_f_force + hardstop_force_f;
+                suspension_force_r == -k_r_force - b_r_force + hardstop_force_r;
+            end
+        end
+    end
+else
+    equations
+        suspension_force_f == 0;
+        suspension_force_r == 0;
+    end
+end
+
+if liftoff_warning
+    intermediates (Access = private, ExternalAccess = none)
+        force_f = NF; % Normal force at the front axle
+        force_r = NR; % Normal force at the rear axle
+    end
+    equations
+        assert(force_f > 0, Warn=true)
+        assert(force_r > 0, Warn=true)
+    end
+end
+
+annotations
+    UILayout = [UIGroup('physmod:simscape:library:gui:groups:Main', ...
+                        mass, n_w, x_f, x_r, y_c, mass_var, g, liftoff_warning)
+                UIGroup('physmod:sdl:library:tabs:Drag', ...
+                        area, Cd_var, Cd, rho)
+                UIGroup('physmod:sdl:library:tabs:Pitch', ...
+                        model_pitch, inertia, suspension_model, k_f, b_f, k_r, b_r, k_f_TLU, x_f_TLU, b_f_TLU, v_f_TLU, k_r_TLU, x_r_TLU, b_r_TLU, v_r_TLU, interp_method, extrap_method, model_hardstop, upper_bound_f, lower_bound_f, stop_k_f, stop_b_f, upper_bound_r, lower_bound_r, stop_k_r, stop_b_r, initial_pitch, initial_pitch_rate)]
+end
+end
