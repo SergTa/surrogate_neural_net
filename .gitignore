@@ -1,3 +1,4 @@
+*.tmp
 *.slxc
 /slprj
 *.autosave
